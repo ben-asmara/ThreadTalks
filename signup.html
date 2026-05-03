@@ -164,7 +164,7 @@ body::after{
 </div>
 
 <script>
-const API="http://localhost:9000";
+const API = "BACKEND_URL";
 const COLORS=["#6c63ff","#00e5c3","#f59e0b","#ec4899","#3b82f6","#10b981","#f97316","#a855f7","#06b6d4","#84cc16"];
 let selectedColor=COLORS[0];
 
@@ -251,7 +251,7 @@ async function register(){
 
   setLoading(true);
   try{
-    const r=await fetch(`${API}/auth/register`,{
+    const r=await fetch(`${API}/api/auth/register`,{
       method:"POST",headers:{"Content-Type":"application/json"},
       body:JSON.stringify({username,display_name:display,password})
     });
