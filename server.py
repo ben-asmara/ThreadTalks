@@ -1,42 +1,41 @@
 """
 =============================================================
-  ThreadTalk v3 — Threads + Sockets + SQLite + Auth + Admin
+  ThreadTalk v4  —  Cloud Edition
+  Threads · Sockets · SQLite · Auth · WebSocket
 =============================================================
-  Run:  python server.py
-  Port: 9001
+  Single port handles EVERYTHING:
+    GET  /health    → health check (Render needs this)
+    *    /api/*     → REST API  (auth + admin)
+    WS   /ws        → WebSocket chat  (one thread per client)
 
-  First user to register automatically becomes ADMIN.
-  Admin commands (sent as chat messages):
-    /kick <name>      — disconnect a user
-    /ban <name>       — ban a user permanently
-    /unban <name>     — unban a user
-    /mute <name>      — mute a user (cannot send messages)
-    /unmute <name>    — unmute a user
-    /addroom <name>   — create a new room
-    /delroom <name>   — delete a room
-    /broadcast <msg>  — send to ALL rooms
-    /stats            — print server stats
+  Deploy to Render / Railway — zero extra config needed.
+  Run locally:  python server.py
 =============================================================
 """
 
-import socket, threading, sqlite3, json, sys, hashlib, secrets, time
+import threading, sqlite3, json, sys, hashlib, secrets, os, struct, base64
+import hashlib as hl
 from datetime import datetime
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from urllib.parse import urlparse
 
-HOST    = "0.0.0.0"
-PORT    = 9001
-DB_FILE = "threadtalk.db"
-
-clients      = {}   # conn -> {name, addr, room, color, role, session}
-clients_lock = threading.Lock()
+# ─── Config ───────────────────────────────────────────────────────────────────
+PORT    = int(os.environ.get("PORT", 10000))
+DB_FILE = os.environ.get("DB_FILE", "chat.db")
 
 COLORS = ["#6c63ff","#00e5c3","#f59e0b","#ec4899","#3b82f6",
-          "#10b981","#f97316","#a855f7","#ef4444","#06b6d4"]
+          "#10b981","#f97316","#a855f7","#06b6d4","#84cc16"]
 
-# ─── DB Setup ─────────────────────────────────────────────────────────────────
+# ─── Shared state ─────────────────────────────────────────────────────────────
+ws_clients      = {}
+ws_clients_lock = threading.Lock()
+sessions        = {}
+sessions_lock   = threading.Lock()
+
+# ─── Database ─────────────────────────────────────────────────────────────────
 _db_lock = threading.Lock()
 _db_conn = sqlite3.connect(DB_FILE, check_same_thread=False)
 _db_conn.row_factory = sqlite3.Row
-_db_conn.execute("PRAGMA journal_mode=WAL")
 
 def db_exec(sql, params=()):
     with _db_lock:
@@ -54,504 +53,461 @@ def db_one(sql, params=()):
 
 def init_db():
     db_exec("""CREATE TABLE IF NOT EXISTS users (
-        id           INTEGER PRIMARY KEY AUTOINCREMENT,
-        name         TEXT UNIQUE NOT NULL,
-        password     TEXT NOT NULL,
-        color        TEXT NOT NULL DEFAULT '#6c63ff',
-        role         TEXT NOT NULL DEFAULT 'user',
-        status       TEXT NOT NULL DEFAULT 'active',
-        msg_count    INTEGER DEFAULT 0,
-        created_at   TEXT NOT NULL,
-        last_seen    TEXT
-    )""")
-    db_exec("""CREATE TABLE IF NOT EXISTS sessions (
-        token      TEXT PRIMARY KEY,
-        user_name  TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        expires_at TEXT NOT NULL
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        username      TEXT UNIQUE NOT NULL,
+        display_name  TEXT NOT NULL,
+        password_hash TEXT NOT NULL,
+        color         TEXT NOT NULL DEFAULT '#6c63ff',
+        is_admin      INTEGER NOT NULL DEFAULT 0,
+        is_banned     INTEGER NOT NULL DEFAULT 0,
+        created_at    TEXT NOT NULL,
+        last_seen     TEXT,
+        msg_count     INTEGER DEFAULT 0
     )""")
     db_exec("""CREATE TABLE IF NOT EXISTS rooms (
         id         INTEGER PRIMARY KEY AUTOINCREMENT,
         name       TEXT UNIQUE NOT NULL,
+        topic      TEXT DEFAULT '',
         created_by TEXT DEFAULT 'system',
         created_at TEXT NOT NULL
     )""")
     db_exec("""CREATE TABLE IF NOT EXISTS messages (
         id        INTEGER PRIMARY KEY AUTOINCREMENT,
         room      TEXT NOT NULL,
+        user_id   INTEGER NOT NULL,
         user_name TEXT NOT NULL,
         text      TEXT NOT NULL,
-        sent_at   TEXT NOT NULL,
-        deleted   INTEGER DEFAULT 0
+        sent_at   TEXT NOT NULL
     )""")
-    db_exec("""CREATE TABLE IF NOT EXISTS audit_log (
-        id         INTEGER PRIMARY KEY AUTOINCREMENT,
-        actor      TEXT NOT NULL,
-        action     TEXT NOT NULL,
-        target     TEXT,
-        detail     TEXT,
+    db_exec("""CREATE TABLE IF NOT EXISTS sessions (
+        token      TEXT PRIMARY KEY,
+        user_id    INTEGER NOT NULL,
         created_at TEXT NOT NULL
     )""")
-    for room in ["general","random","tech","announcements"]:
-        db_exec("INSERT OR IGNORE INTO rooms (name,created_by,created_at) VALUES (?,?,?)",
-                (room,"system",iso_now()))
-    print("[db] Database ready ✓  →  " + DB_FILE)
+    for name, topic in [("general","General chat"),("random","Anything goes"),("tech","Tech talk")]:
+        db_exec("INSERT OR IGNORE INTO rooms (name,topic,created_at) VALUES (?,?,?)",
+                (name, topic, iso_now()))
+    if not db_one("SELECT id FROM users WHERE username='admin'"):
+        db_exec("""INSERT INTO users (username,display_name,password_hash,color,is_admin,created_at)
+                   VALUES (?,?,?,?,1,?)""",
+                ("admin","Administrator",hash_pw("admin123"),"#6c63ff",iso_now()))
+        print("[db] Admin created → admin / admin123")
+    print(f"[db] SQLite ready ✓ → {DB_FILE}")
 
-# ─── Time helpers ─────────────────────────────────────────────────────────────
-def iso_now(): return datetime.now().isoformat(timespec="seconds")
-def ts():      return datetime.now().strftime("%H:%M")
+# ─── Helpers ──────────────────────────────────────────────────────────────────
+def iso_now():   return datetime.now().isoformat(timespec="seconds")
+def ts():        return datetime.now().strftime("%H:%M")
+def hash_pw(pw): return hashlib.sha256(pw.encode()).hexdigest()
+def new_token(): return secrets.token_hex(32)
+def pick_color():
+    n = db_query("SELECT COUNT(*) as n FROM users")[0]["n"]
+    return COLORS[n % len(COLORS)]
 
-# ─── Auth helpers ─────────────────────────────────────────────────────────────
-def hash_pw(password):
-    return hashlib.sha256(password.encode()).hexdigest()
-
-def register_user(name, password):
-    existing = db_one("SELECT id FROM users WHERE name=?", (name,))
-    if existing:
-        return None, "Username already taken."
-    count = db_one("SELECT COUNT(*) as c FROM users")[0]
-    role  = "admin" if count == 0 else "user"
-    color = COLORS[count % len(COLORS)]
-    db_exec("""INSERT INTO users (name,password,color,role,status,created_at)
-               VALUES (?,?,?,?,?,?)""",
-            (name, hash_pw(password), color, role, "active", iso_now()))
-    audit("system","register",name,f"role={role}")
-    return db_one("SELECT * FROM users WHERE name=?", (name,)), None
-
-def login_user(name, password):
-    row = db_one("SELECT * FROM users WHERE name=?", (name,))
-    if not row:
-        return None, "User not found."
-    if row["password"] != hash_pw(password):
-        return None, "Wrong password."
-    if row["status"] == "banned":
-        return None, "Your account has been banned."
-    token = secrets.token_hex(32)
-    expires = datetime.now().replace(hour=23,minute=59,second=59).isoformat()
-    db_exec("INSERT INTO sessions (token,user_name,created_at,expires_at) VALUES (?,?,?,?)",
-            (token, name, iso_now(), expires))
-    db_exec("UPDATE users SET last_seen=? WHERE name=?", (iso_now(), name))
-    return {"user": dict(row), "token": token}, None
-
-def validate_session(token):
-    row = db_one("SELECT * FROM sessions WHERE token=?", (token,))
+def resolve_session(token):
+    if not token: return None
+    with sessions_lock:
+        if token in sessions: return sessions[token]
+    row = db_one("SELECT u.* FROM sessions s JOIN users u ON s.user_id=u.id WHERE s.token=?", (token,))
     if not row: return None
-    user = db_one("SELECT * FROM users WHERE name=?", (row["user_name"],))
-    if not user or user["status"] == "banned": return None
-    return dict(user)
-
-def logout_session(token):
-    db_exec("DELETE FROM sessions WHERE token=?", (token,))
-
-# ─── Data helpers ─────────────────────────────────────────────────────────────
-def save_message(room, user_name, text):
-    db_exec("INSERT INTO messages (room,user_name,text,sent_at) VALUES (?,?,?,?)",
-            (room, user_name, text, iso_now()))
-    db_exec("UPDATE users SET msg_count=msg_count+1, last_seen=? WHERE name=?",
-            (iso_now(), user_name))
+    info = dict(row)
+    with sessions_lock:
+        sessions[token] = info
+    return info
 
 def get_history(room, limit=40):
-    rows = db_query("""SELECT m.user_name, m.text, m.sent_at, u.color, u.role
-                       FROM messages m LEFT JOIN users u ON m.user_name=u.name
-                       WHERE m.room=? AND m.deleted=0
-                       ORDER BY m.id DESC LIMIT ?""", (room, limit))
+    rows = db_query(
+        "SELECT m.user_name,m.text,m.sent_at,u.color FROM messages m "
+        "LEFT JOIN users u ON m.user_id=u.id "
+        "WHERE m.room=? ORDER BY m.id DESC LIMIT ?", (room, limit))
     return list(reversed([dict(r) for r in rows]))
 
 def get_rooms():
-    return [r["name"] for r in db_query("SELECT name FROM rooms ORDER BY name")]
-
-def get_all_users():
-    rows = db_query("""SELECT name,color,role,status,msg_count,created_at,last_seen
-                       FROM users ORDER BY created_at DESC""")
-    return [dict(r) for r in rows]
+    return [dict(r) for r in db_query("SELECT name,topic FROM rooms ORDER BY name")]
 
 def get_leaderboard():
-    rows = db_query("""SELECT name,color,role,msg_count FROM users
-                       WHERE status='active' ORDER BY msg_count DESC LIMIT 10""")
+    rows = db_query("SELECT display_name as name,color,msg_count FROM users ORDER BY msg_count DESC LIMIT 10")
     return [dict(r) for r in rows]
 
 def get_stats():
     return {
-        "messages": db_one("SELECT COUNT(*) as c FROM messages WHERE deleted=0")[0],
-        "users":    db_one("SELECT COUNT(*) as c FROM users")[0],
-        "rooms":    db_one("SELECT COUNT(*) as c FROM rooms")[0],
-        "banned":   db_one("SELECT COUNT(*) as c FROM users WHERE status='banned'")[0],
-        "muted":    db_one("SELECT COUNT(*) as c FROM users WHERE status='muted'")[0],
+        "messages": db_one("SELECT COUNT(*) as c FROM messages")["c"],
+        "users":    db_one("SELECT COUNT(*) as c FROM users")["c"],
+        "rooms":    db_one("SELECT COUNT(*) as c FROM rooms")["c"],
     }
 
-def get_audit_log(limit=50):
-    rows = db_query("""SELECT actor,action,target,detail,created_at
-                       FROM audit_log ORDER BY id DESC LIMIT ?""", (limit,))
-    return [dict(r) for r in rows]
+def save_message(room, user_id, user_name, text):
+    db_exec("INSERT INTO messages (room,user_id,user_name,text,sent_at) VALUES (?,?,?,?,?)",
+            (room, user_id, user_name, text, iso_now()))
+    db_exec("UPDATE users SET msg_count=msg_count+1,last_seen=? WHERE id=?", (iso_now(), user_id))
 
-def audit(actor, action, target=None, detail=None):
-    db_exec("INSERT INTO audit_log (actor,action,target,detail,created_at) VALUES (?,?,?,?,?)",
-            (actor, action, target, detail, iso_now()))
+# ─── Pure-stdlib WebSocket (RFC 6455) ─────────────────────────────────────────
+WS_MAGIC = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
-def is_muted(name):
-    row = db_one("SELECT status FROM users WHERE name=?", (name,))
-    return row and row["status"] == "muted"
+def ws_handshake(rfile, wfile, headers):
+    key    = headers.get("Sec-WebSocket-Key","").strip()
+    accept = base64.b64encode(hl.sha1((key + WS_MAGIC).encode()).digest()).decode()
+    wfile.write(
+        b"HTTP/1.1 101 Switching Protocols\r\n"
+        b"Upgrade: websocket\r\nConnection: Upgrade\r\n"
+        + f"Sec-WebSocket-Accept: {accept}\r\n\r\n".encode()
+    )
+    wfile.flush()
 
-# ─── Network ──────────────────────────────────────────────────────────────────
+def ws_recv(rfile):
+    try:
+        b1, b2 = rfile.read(2)
+    except Exception:
+        return None, None
+    opcode = b1 & 0x0F
+    masked = bool(b2 & 0x80)
+    length = b2 & 0x7F
+    if length == 126:
+        length = struct.unpack("!H", rfile.read(2))[0]
+    elif length == 127:
+        length = struct.unpack("!Q", rfile.read(8))[0]
+    mask = rfile.read(4) if masked else b""
+    data = bytearray(rfile.read(length))
+    if masked:
+        data = bytearray(b ^ mask[i % 4] for i, b in enumerate(data))
+    return opcode, bytes(data)
+
+def ws_send(wfile, text: str):
+    data   = text.encode("utf-8")
+    length = len(data)
+    hdr    = bytearray([0x81])
+    if length < 126:       hdr.append(length)
+    elif length < 65536:   hdr += bytearray([126]) + struct.pack("!H", length)
+    else:                  hdr += bytearray([127]) + struct.pack("!Q", length)
+    try:
+        wfile.write(bytes(hdr) + data)
+        wfile.flush()
+        return True
+    except Exception:
+        return False
+
+def ws_close(wfile):
+    try: wfile.write(bytes([0x88, 0x00])); wfile.flush()
+    except: pass
+
+# ─── Chat helpers ─────────────────────────────────────────────────────────────
 def send_to(conn, payload):
-    try: conn.sendall((json.dumps(payload)+"\n").encode())
-    except OSError: remove_client(conn)
+    ws_send(conn["wfile"], json.dumps(payload))
 
-def broadcast(payload, room=None, exclude_conn=None):
-    data = (json.dumps(payload)+"\n").encode()
+def broadcast(payload, room=None, exclude=None):
+    msg  = json.dumps(payload)
     dead = []
-    with clients_lock:
-        for conn, info in clients.items():
-            if conn is exclude_conn: continue
+    with ws_clients_lock:
+        for c, info in ws_clients.items():
+            if c is exclude: continue
             if room and info.get("room") != room: continue
-            try: conn.sendall(data)
-            except OSError: dead.append(conn)
-    for c in dead: remove_client(c)
-
-def broadcast_all(payload):
-    """Send to every connected client regardless of room."""
-    data = (json.dumps(payload)+"\n").encode()
-    dead = []
-    with clients_lock:
-        for conn in list(clients):
-            try: conn.sendall(data)
-            except OSError: dead.append(conn)
+            if not ws_send(c["wfile"], msg): dead.append(c)
     for c in dead: remove_client(c)
 
 def user_list(room=None):
-    with clients_lock:
-        return [{"name":v["name"],"color":v["color"],"role":v["role"]}
-                for v in clients.values()
+    with ws_clients_lock:
+        return [{"name":v["name"],"color":v["color"]}
+                for v in ws_clients.values()
                 if room is None or v.get("room")==room]
 
-def find_conn_by_name(name):
-    with clients_lock:
-        for conn, info in clients.items():
-            if info["name"] == name: return conn
-    return None
-
 def remove_client(conn):
-    with clients_lock:
-        info = clients.pop(conn, None)
+    with ws_clients_lock:
+        info = ws_clients.pop(conn, None)
     if not info: return
-    try: conn.close()
-    except OSError: pass
+    try: ws_close(conn["wfile"])
+    except: pass
     room = info.get("room","general")
-    print(f"[{ts()}] ✗ {info['name']} left #{room}")
-    broadcast({"type":"system","text":f"{info['name']} left.",
-               "time":ts(),"users":user_list(room),"room":room,
-               "stats":get_stats()}, room=room)
+    print(f"[ws] ✗ {info['name']} left #{room}")
+    broadcast({"type":"system","text":f"{info['name']} left.","time":ts(),
+               "users":user_list(room),"room":room,"stats":get_stats()}, room=room)
 
-# ─── Admin commands ───────────────────────────────────────────────────────────
-def handle_command(conn, info, text):
-    """Returns True if text was an admin command."""
-    if not text.startswith("/"): return False
-    parts = text[1:].split(" ", 1)
-    cmd   = parts[0].lower()
-    arg   = parts[1].strip() if len(parts)>1 else ""
-    name  = info["name"]
-    role  = info["role"]
-
-    def reply(msg):
-        send_to(conn, {"type":"system","text":msg,"time":ts(),"room":info.get("room","general")})
-
-    if role != "admin":
-        reply("⛔ Admin only command.")
-        return True
-
-    if cmd == "kick":
-        target_conn = find_conn_by_name(arg)
-        if target_conn:
-            send_to(target_conn, {"type":"kicked","text":"You were kicked by an admin."})
-            remove_client(target_conn)
-            audit(name,"kick",arg)
-            reply(f"✓ Kicked {arg}.")
-        else: reply(f"User {arg} not online.")
-
-    elif cmd == "ban":
-        db_exec("UPDATE users SET status='banned' WHERE name=?", (arg,))
-        target_conn = find_conn_by_name(arg)
-        if target_conn:
-            send_to(target_conn,{"type":"banned","text":"You have been banned."})
-            remove_client(target_conn)
-        audit(name,"ban",arg)
-        reply(f"✓ Banned {arg}.")
-
-    elif cmd == "unban":
-        db_exec("UPDATE users SET status='active' WHERE name=?", (arg,))
-        audit(name,"unban",arg)
-        reply(f"✓ Unbanned {arg}.")
-
-    elif cmd == "mute":
-        db_exec("UPDATE users SET status='muted' WHERE name=?", (arg,))
-        audit(name,"mute",arg)
-        reply(f"✓ Muted {arg}.")
-        target_conn = find_conn_by_name(arg)
-        if target_conn:
-            send_to(target_conn,{"type":"system","text":"You have been muted by an admin.","time":ts(),"room":info.get("room")})
-
-    elif cmd == "unmute":
-        db_exec("UPDATE users SET status='active' WHERE name=?", (arg,))
-        audit(name,"unmute",arg)
-        reply(f"✓ Unmuted {arg}.")
-
-    elif cmd == "addroom":
-        roomname = arg.lower().replace(" ","_")[:20]
-        try:
-            db_exec("INSERT INTO rooms (name,created_by,created_at) VALUES (?,?,?)",
-                    (roomname, name, iso_now()))
-            audit(name,"addroom",roomname)
-            broadcast_all({"type":"rooms_updated","rooms":get_rooms()})
-            reply(f"✓ Room #{roomname} created.")
-        except: reply("Room already exists.")
-
-    elif cmd == "delroom":
-        if arg in ("general","announcements"):
-            reply("Cannot delete core rooms.")
-        else:
-            db_exec("DELETE FROM rooms WHERE name=?", (arg,))
-            audit(name,"delroom",arg)
-            broadcast_all({"type":"rooms_updated","rooms":get_rooms()})
-            reply(f"✓ Room #{arg} deleted.")
-
-    elif cmd == "broadcast":
-        broadcast_all({"type":"broadcast","text":f"📢 [Admin] {arg}","time":ts(),"name":name})
-        audit(name,"broadcast",None,arg)
-
-    elif cmd == "stats":
-        s = get_stats()
-        reply(f"📊 msgs:{s['messages']} users:{s['users']} online:{len(clients)} banned:{s['banned']} muted:{s['muted']}")
-
-    elif cmd == "promote":
-        db_exec("UPDATE users SET role='admin' WHERE name=?", (arg,))
-        audit(name,"promote",arg)
-        reply(f"✓ {arg} promoted to admin.")
-
-    elif cmd == "demote":
-        db_exec("UPDATE users SET role='user' WHERE name=?", (arg,))
-        audit(name,"demote",arg)
-        reply(f"✓ {arg} demoted to user.")
-
-    else:
-        reply(f"Unknown command /{cmd}")
-
-    return True
-
-# ─── Per-client thread ────────────────────────────────────────────────────────
-def handle_client(conn, addr):
+# ─── WebSocket client thread ──────────────────────────────────────────────────
+def handle_ws(conn):
     tname = threading.current_thread().name
-    print(f"[{ts()}] ✔ {addr} [{tname}]")
-    buf = ""
 
-    def recv_line():
-        nonlocal buf
-        while True:
-            chunk = conn.recv(2048).decode("utf-8", errors="replace")
-            if not chunk: raise ConnectionResetError
-            buf += chunk
-            if "\n" in buf:
-                line, buf = buf.split("\n", 1)
-                return json.loads(line.strip())
+    # Wait for join packet
+    while True:
+        opcode, data = ws_recv(conn["rfile"])
+        if opcode is None or opcode == 8: return
+        if opcode != 1: continue
+        try:
+            pkt = json.loads(data.decode("utf-8","replace"))
+            if pkt.get("type") == "join": break
+        except: continue
 
-    try:
-        # ── Auth handshake ──
-        pkt = recv_line()
-        action = pkt.get("type")
+    token = pkt.get("token","")
+    room  = pkt.get("room","general")
+    user  = resolve_session(token)
 
-        if action == "register":
-            user_row, err = register_user(pkt.get("name",""), pkt.get("password",""))
-            if err:
-                send_to(conn, {"type":"auth_error","text":err})
-                conn.close(); return
-            # auto-login after register
-            result, _ = login_user(pkt["name"], pkt["password"])
-            user = result["user"]; token = result["token"]
-            send_to(conn, {"type":"auth_ok","name":user["name"],"color":user["color"],
-                           "role":user["role"],"token":token,
-                           "text":f"Account created! Welcome, {user['name']}."})
+    if not user:
+        send_to(conn, {"type":"error","text":"Invalid session. Please sign in."})
+        ws_close(conn["wfile"]); return
+    if user.get("is_banned"):
+        send_to(conn, {"type":"error","text":"Your account has been banned."})
+        ws_close(conn["wfile"]); return
 
-        elif action == "login":
-            result, err = login_user(pkt.get("name",""), pkt.get("password",""))
-            if err:
-                send_to(conn, {"type":"auth_error","text":err})
-                conn.close(); return
-            user = result["user"]; token = result["token"]
-            send_to(conn, {"type":"auth_ok","name":user["name"],"color":user["color"],
-                           "role":user["role"],"token":token,
-                           "text":f"Welcome back, {user['name']}!"})
+    name    = user["display_name"]
+    color   = user["color"]
+    user_id = user["id"]
+    db_exec("UPDATE users SET last_seen=? WHERE id=?", (iso_now(), user_id))
 
-        elif action == "resume":
-            user = validate_session(pkt.get("token",""))
-            if not user:
-                send_to(conn, {"type":"auth_error","text":"Session expired. Please log in again."})
-                conn.close(); return
-            token = pkt["token"]
-            send_to(conn, {"type":"auth_ok","name":user["name"],"color":user["color"],
-                           "role":user["role"],"token":token,
-                           "text":f"Session restored. Welcome back, {user['name']}!"})
-        else:
-            send_to(conn, {"type":"auth_error","text":"Please log in first."})
-            conn.close(); return
+    rooms_list = [r["name"] for r in get_rooms()]
+    if room not in rooms_list: room = "general"
 
-        # ── Join a room ──
-        pkt2 = recv_line()
-        if pkt2.get("type") != "join":
-            conn.close(); return
-        room = pkt2.get("room","general")
-        if room not in get_rooms(): room = "general"
+    with ws_clients_lock:
+        ws_clients[conn] = {"name":name,"color":color,"room":room,"user_id":user_id}
 
-        name  = user["name"]
-        color = user["color"]
-        role  = user["role"]
+    print(f"[ws] ★  {name} → #{room}  [{tname}]")
 
-        with clients_lock:
-            clients[conn] = {"name":name,"addr":addr,"room":room,
-                             "color":color,"role":role,"token":token}
+    send_to(conn, {
+        "type":"welcome","name":name,"color":color,"room":room,
+        "rooms":rooms_list,"history":get_history(room),
+        "users":user_list(room),"stats":get_stats(),
+        "leaderboard":get_leaderboard(),"time":ts(),
+        "msg_count":user["msg_count"],"is_admin":bool(user["is_admin"]),
+        "text":f"Welcome back, {name}!",
+    })
+    broadcast({"type":"system","text":f"{name} joined #{room}.","time":ts(),
+               "users":user_list(room),"room":room,"stats":get_stats(),
+               "leaderboard":get_leaderboard()}, room=room, exclude=conn)
 
-        print(f"[{ts()}] ★  {name} ({role}) → #{room} [{tname}]")
+    while True:
+        opcode, data = ws_recv(conn["rfile"])
+        if opcode is None or opcode == 8: break
+        if opcode != 1: continue
+        try: pkt = json.loads(data.decode("utf-8","replace"))
+        except: continue
 
-        send_to(conn, {
-            "type":"welcome","name":name,"color":color,"role":role,"room":room,
-            "rooms":get_rooms(),"history":get_history(room),
-            "users":user_list(room),"stats":get_stats(),
-            "leaderboard":get_leaderboard(),"time":ts(),
-            "msg_count":user["msg_count"],
-            "text":f"Joined #{room}. You have sent {user['msg_count']} messages.",
-        })
+        mtype = pkt.get("type")
 
-        broadcast({"type":"system","text":f"{name} joined #{room}.","time":ts(),
-                   "users":user_list(room),"room":room,"stats":get_stats(),
-                   "leaderboard":get_leaderboard()}, room=room, exclude_conn=conn)
+        if mtype == "message":
+            text = pkt.get("text","").strip()
+            if not text: continue
+            cur = ws_clients.get(conn,{}).get("room","general")
+            save_message(cur, user_id, name, text)
+            payload = {"type":"message","name":name,"color":color,"text":text,
+                       "time":ts(),"room":cur,
+                       "leaderboard":get_leaderboard(),"stats":get_stats()}
+            send_to(conn, payload)
+            broadcast(payload, room=cur, exclude=conn)
 
-        # ── Message loop ──
-        while True:
-            pkt = recv_line()
-            mtype = pkt.get("type")
+        elif mtype == "switch_room":
+            nr = pkt.get("room","general")
+            if nr not in [r["name"] for r in get_rooms()]: continue
+            old = ws_clients[conn].get("room","general")
+            with ws_clients_lock: ws_clients[conn]["room"] = nr
+            broadcast({"type":"system","text":f"{name} left #{old}.","time":ts(),
+                       "users":user_list(old),"room":old}, room=old)
+            send_to(conn, {"type":"room_switched","room":nr,
+                           "history":get_history(nr),"users":user_list(nr),"time":ts()})
+            broadcast({"type":"system","text":f"{name} joined #{nr}.","time":ts(),
+                       "users":user_list(nr),"room":nr}, room=nr, exclude=conn)
 
-            if mtype == "message":
-                text = pkt.get("text","").strip()
-                if not text: continue
-                cur_room = clients.get(conn,{}).get("room","general")
+        elif mtype == "typing":
+            cur = ws_clients.get(conn,{}).get("room","general")
+            broadcast({"type":"typing","name":name,"active":pkt.get("active",False),
+                       "room":cur}, room=cur, exclude=conn)
 
-                if handle_command(conn, clients.get(conn,{}), text):
-                    continue
+        elif mtype == "get_history":
+            cur = ws_clients.get(conn,{}).get("room","general")
+            send_to(conn,{"type":"history","room":cur,"messages":get_history(cur,100)})
 
-                if is_muted(name):
-                    send_to(conn,{"type":"system","text":"You are muted.","time":ts(),"room":cur_room})
-                    continue
-
-                save_message(cur_room, name, text)
-                payload = {"type":"message","name":name,"color":color,"role":role,
-                           "text":text,"time":ts(),"room":cur_room,
-                           "leaderboard":get_leaderboard(),"stats":get_stats()}
-                send_to(conn, payload)
-                broadcast(payload, room=cur_room, exclude_conn=conn)
-
-            elif mtype == "switch_room":
-                new_room = pkt.get("room","general")
-                if new_room not in get_rooms(): continue
-                old_room = clients[conn].get("room","general")
-                with clients_lock: clients[conn]["room"] = new_room
-                broadcast({"type":"system","text":f"{name} left.","time":ts(),
-                           "users":user_list(old_room),"room":old_room}, room=old_room)
-                send_to(conn,{"type":"room_switched","room":new_room,
-                              "history":get_history(new_room),"users":user_list(new_room),"time":ts()})
-                broadcast({"type":"system","text":f"{name} joined.","time":ts(),
-                           "users":user_list(new_room),"room":new_room}, room=new_room, exclude_conn=conn)
-
-            elif mtype == "typing":
-                cur_room = clients.get(conn,{}).get("room","general")
-                broadcast({"type":"typing","name":name,"active":pkt.get("active",False),"room":cur_room},
-                          room=cur_room, exclude_conn=conn)
-
-            elif mtype == "admin_data":
-                if role == "admin":
-                    send_to(conn,{"type":"admin_data","users":get_all_users(),
-                                  "audit":get_audit_log(),"stats":get_stats(),
-                                  "rooms":get_rooms(),"online":user_list()})
-
-            elif mtype == "admin_action":
-                if role != "admin": continue
-                act = pkt.get("action"); target = pkt.get("target","")
-                if act == "ban":
-                    db_exec("UPDATE users SET status='banned' WHERE name=?", (target,))
-                    tc = find_conn_by_name(target)
-                    if tc:
-                        send_to(tc,{"type":"banned","text":"You have been banned."})
-                        remove_client(tc)
-                    audit(name,"ban",target)
-                elif act == "unban":
-                    db_exec("UPDATE users SET status='active' WHERE name=?", (target,))
-                    audit(name,"unban",target)
-                elif act == "mute":
-                    db_exec("UPDATE users SET status='muted' WHERE name=?", (target,))
-                    audit(name,"mute",target)
-                elif act == "unmute":
-                    db_exec("UPDATE users SET status='active' WHERE name=?", (target,))
-                    audit(name,"unmute",target)
-                elif act == "kick":
-                    tc = find_conn_by_name(target)
-                    if tc:
-                        send_to(tc,{"type":"kicked","text":"Kicked by admin."})
-                        remove_client(tc)
-                    audit(name,"kick",target)
-                elif act == "promote":
-                    db_exec("UPDATE users SET role='admin' WHERE name=?", (target,))
-                    audit(name,"promote",target)
-                elif act == "demote":
-                    db_exec("UPDATE users SET role='user' WHERE name=?", (target,))
-                    audit(name,"demote",target)
-                elif act == "delete_room":
-                    if target not in ("general","announcements"):
-                        db_exec("DELETE FROM rooms WHERE name=?", (target,))
-                        broadcast_all({"type":"rooms_updated","rooms":get_rooms()})
-                        audit(name,"delete_room",target)
-                elif act == "add_room":
-                    rn = target.lower().replace(" ","_")[:20]
-                    try:
-                        db_exec("INSERT INTO rooms (name,created_by,created_at) VALUES (?,?,?)",
-                                (rn,name,iso_now()))
-                        broadcast_all({"type":"rooms_updated","rooms":get_rooms()})
-                        audit(name,"add_room",rn)
-                    except: pass
-                # refresh admin panel
-                send_to(conn,{"type":"admin_data","users":get_all_users(),
-                              "audit":get_audit_log(),"stats":get_stats(),
-                              "rooms":get_rooms(),"online":user_list()})
-
-            elif mtype == "logout":
-                logout_session(token)
-                send_to(conn,{"type":"logged_out"})
-                break
-
-    except (ConnectionResetError, OSError, json.JSONDecodeError):
-        pass
     remove_client(conn)
 
-# ─── Main ─────────────────────────────────────────────────────────────────────
-def main():
-    init_db()
-    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    srv.bind((HOST, PORT))
-    srv.listen(50)
-    print(f"""
-╔════════════════════════════════════════════════════╗
-║  ThreadTalk v3  —  Threads + Sockets + Auth + DB   ║
-║  TCP  : {HOST}:{PORT}                              ║
-║  DB   : {DB_FILE}                       ║
-║  First registered user becomes ADMIN               ║
-╚════════════════════════════════════════════════════╝
-""")
-    try:
-        while True:
-            conn, addr = srv.accept()
-            t = threading.Thread(target=handle_client, args=(conn,addr),
-                                 daemon=True, name=f"T-{addr[1]}")
-            t.start()
-    except KeyboardInterrupt:
-        print("\n[server] Shutting down.")
-        srv.close(); sys.exit(0)
+# ─── Unified HTTP + WebSocket request handler ─────────────────────────────────
+def json_resp(h, code, data):
+    body = json.dumps(data).encode()
+    h.send_response(code)
+    h.send_header("Content-Type","application/json")
+    h.send_header("Content-Length", len(body))
+    h.send_header("Access-Control-Allow-Origin","*")
+    h.send_header("Access-Control-Allow-Headers","Content-Type,Authorization")
+    h.send_header("Access-Control-Allow-Methods","GET,POST,PUT,DELETE,OPTIONS")
+    h.end_headers()
+    h.wfile.write(body)
 
+def get_token(h):
+    return h.headers.get("Authorization","").replace("Bearer ","").strip()
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, *a): pass
+
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin","*")
+        self.send_header("Access-Control-Allow-Headers","Content-Type,Authorization")
+        self.send_header("Access-Control-Allow-Methods","GET,POST,PUT,DELETE,OPTIONS")
+        self.end_headers()
+
+    def read_body(self):
+        n = int(self.headers.get("Content-Length",0))
+        return json.loads(self.rfile.read(n)) if n else {}
+
+    def do_GET(self):
+        # WebSocket upgrade
+        if self.headers.get("Upgrade","").lower() == "websocket":
+            ws_handshake(self.rfile, self.wfile, self.headers)
+            conn = {"rfile":self.rfile,"wfile":self.wfile}
+            t = threading.Thread(target=handle_ws, args=(conn,), daemon=True,
+                                 name=f"ws-{threading.active_count()}")
+            t.start(); t.join()
+            return
+
+        path = urlparse(self.path).path
+
+        if path in ("/","/health"):
+            body = b'{"status":"ok","app":"ThreadTalk v4"}'
+            self.send_response(200)
+            self.send_header("Content-Type","application/json")
+            self.send_header("Content-Length",len(body))
+            self.end_headers(); self.wfile.write(body)
+
+        elif path == "/api/auth/me":
+            u = resolve_session(get_token(self))
+            if not u: return json_resp(self,401,{"error":"Not authenticated."})
+            json_resp(self,200,{"user":{"id":u["id"],"username":u["username"],
+                "display_name":u["display_name"],"color":u["color"],
+                "is_admin":bool(u["is_admin"]),"msg_count":u["msg_count"]}})
+
+        elif path == "/api/admin/users":
+            u = resolve_session(get_token(self))
+            if not u or not u.get("is_admin"): return json_resp(self,403,{"error":"Admin only."})
+            rows = db_query("SELECT id,username,display_name,color,is_admin,is_banned,created_at,last_seen,msg_count FROM users ORDER BY created_at DESC")
+            json_resp(self,200,{"users":[dict(r) for r in rows]})
+
+        elif path == "/api/admin/messages":
+            u = resolve_session(get_token(self))
+            if not u or not u.get("is_admin"): return json_resp(self,403,{"error":"Admin only."})
+            rows = db_query("SELECT id,room,user_name,text,sent_at FROM messages ORDER BY id DESC LIMIT 100")
+            json_resp(self,200,{"messages":[dict(r) for r in rows]})
+
+        elif path == "/api/admin/rooms":
+            u = resolve_session(get_token(self))
+            if not u or not u.get("is_admin"): return json_resp(self,403,{"error":"Admin only."})
+            rows = db_query("SELECT r.*,(SELECT COUNT(*) FROM messages m WHERE m.room=r.name) as msg_count FROM rooms r ORDER BY r.name")
+            json_resp(self,200,{"rooms":[dict(r) for r in rows]})
+
+        elif path == "/api/admin/stats":
+            u = resolve_session(get_token(self))
+            if not u or not u.get("is_admin"): return json_resp(self,403,{"error":"Admin only."})
+            stats = get_stats(); stats["online"] = len(ws_clients)
+            json_resp(self,200,{"stats":stats,"leaderboard":get_leaderboard()})
+
+        else:
+            json_resp(self,404,{"error":"Not found."})
+
+    def do_POST(self):
+        path = urlparse(self.path).path
+
+        if path == "/api/auth/register":
+            d = self.read_body()
+            username = (d.get("username") or "").strip().lower()[:30]
+            display  = (d.get("display_name") or username).strip()[:30]
+            password = d.get("password","")
+            if not username or not password:
+                return json_resp(self,400,{"error":"Username and password required."})
+            if len(password) < 6:
+                return json_resp(self,400,{"error":"Password must be at least 6 characters."})
+            if db_one("SELECT id FROM users WHERE username=?", (username,)):
+                return json_resp(self,409,{"error":"Username already taken."})
+            color = pick_color()
+            db_exec("INSERT INTO users (username,display_name,password_hash,color,created_at) VALUES (?,?,?,?,?)",
+                    (username,display,hash_pw(password),color,iso_now()))
+            user  = dict(db_one("SELECT * FROM users WHERE username=?", (username,)))
+            token = new_token()
+            db_exec("INSERT INTO sessions (token,user_id,created_at) VALUES (?,?,?)",(token,user["id"],iso_now()))
+            print(f"[auth] New user: {display}")
+            json_resp(self,201,{"token":token,"user":{"id":user["id"],"username":username,
+                "display_name":display,"color":color,"is_admin":False}})
+
+        elif path == "/api/auth/login":
+            d = self.read_body()
+            username = (d.get("username") or "").strip().lower()
+            password = d.get("password","")
+            user = db_one("SELECT * FROM users WHERE username=? AND password_hash=?",
+                          (username,hash_pw(password)))
+            if not user: return json_resp(self,401,{"error":"Invalid username or password."})
+            user = dict(user)
+            if user.get("is_banned"): return json_resp(self,403,{"error":"Account banned."})
+            token = new_token()
+            db_exec("INSERT INTO sessions (token,user_id,created_at) VALUES (?,?,?)",(token,user["id"],iso_now()))
+            db_exec("UPDATE users SET last_seen=? WHERE id=?",(iso_now(),user["id"]))
+            with sessions_lock: sessions[token] = user
+            print(f"[auth] Login: {user['display_name']}")
+            json_resp(self,200,{"token":token,"user":{"id":user["id"],"username":user["username"],
+                "display_name":user["display_name"],"color":user["color"],"is_admin":bool(user["is_admin"])}})
+
+        elif path == "/api/auth/logout":
+            token = get_token(self)
+            db_exec("DELETE FROM sessions WHERE token=?",(token,))
+            with sessions_lock: sessions.pop(token,None)
+            json_resp(self,200,{"ok":True})
+
+        elif path == "/api/admin/rooms":
+            u = resolve_session(get_token(self))
+            if not u or not u.get("is_admin"): return json_resp(self,403,{"error":"Admin only."})
+            d    = self.read_body()
+            name  = (d.get("name") or "").strip().lower().replace(" ","-")[:20]
+            topic = (d.get("topic") or "").strip()[:80]
+            if not name: return json_resp(self,400,{"error":"Room name required."})
+            if db_one("SELECT id FROM rooms WHERE name=?",(name,)):
+                return json_resp(self,409,{"error":"Room already exists."})
+            db_exec("INSERT INTO rooms (name,topic,created_by,created_at) VALUES (?,?,?,?)",
+                    (name,topic,u["display_name"],iso_now()))
+            broadcast({"type":"system","text":f"New room #{name} created!","time":ts(),
+                       "rooms":[r["name"] for r in get_rooms()]})
+            json_resp(self,201,{"ok":True,"room":name})
+
+        else:
+            json_resp(self,404,{"error":"Not found."})
+
+    def do_PUT(self):
+        path = urlparse(self.path).path
+        u = resolve_session(get_token(self))
+        if not u or not u.get("is_admin"): return json_resp(self,403,{"error":"Admin only."})
+        d = self.read_body()
+        if path.startswith("/api/admin/users/") and path.endswith("/ban"):
+            uid = path.split("/")[4]
+            if uid == str(u["id"]): return json_resp(self,400,{"error":"Cannot ban yourself."})
+            db_exec("UPDATE users SET is_banned=? WHERE id=?",(1 if d.get("banned") else 0, uid))
+            json_resp(self,200,{"ok":True})
+        elif path.startswith("/api/admin/users/") and path.endswith("/admin"):
+            uid = path.split("/")[4]
+            db_exec("UPDATE users SET is_admin=? WHERE id=?",(1 if d.get("is_admin") else 0, uid))
+            json_resp(self,200,{"ok":True})
+        else:
+            json_resp(self,404,{"error":"Not found."})
+
+    def do_DELETE(self):
+        path = urlparse(self.path).path
+        u = resolve_session(get_token(self))
+        if not u or not u.get("is_admin"): return json_resp(self,403,{"error":"Admin only."})
+        if path.startswith("/api/admin/messages/"):
+            db_exec("DELETE FROM messages WHERE id=?",(path.split("/")[4],))
+            json_resp(self,200,{"ok":True})
+        elif path.startswith("/api/admin/rooms/"):
+            rname = path.split("/")[4]
+            if rname == "general": return json_resp(self,400,{"error":"Cannot delete #general."})
+            db_exec("DELETE FROM rooms WHERE name=?",(rname,))
+            json_resp(self,200,{"ok":True})
+        else:
+            json_resp(self,404,{"error":"Not found."})
+
+# ─── Entry point ──────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    main()
+    init_db()
+    print(f"""
+╔══════════════════════════════════════════════════╗
+║  ThreadTalk v4  —  Cloud Edition                 ║
+║  Port     : {PORT}                               ║
+║  WebSocket: ws://0.0.0.0:{PORT}/ws               ║
+║  REST API : http://0.0.0.0:{PORT}/api/*          ║
+║  Admin    : admin / admin123                     ║
+╚══════════════════════════════════════════════════╝
+""")
+    srv = HTTPServer(("0.0.0.0", PORT), Handler)
+    print(f"[server] Listening on :{PORT} …  (Ctrl-C to stop)")
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        print("\n[server] Bye.")
+        sys.exit(0)
