@@ -150,7 +150,7 @@ body::after{
 </div>
 
 <script>
-const API = "http://localhost:9000";
+const API = "BACKEND_URL";
 
 const $user  = document.getElementById("username");
 const $pass  = document.getElementById("password");
@@ -174,7 +174,7 @@ async function login(){
   if(!username||!password){showErr("Please fill in all fields.");return;}
   setLoading(true);
   try{
-    const r=await fetch(`${API}/auth/login`,{
+    const r=await fetch(`${API}/api/auth/login`,{
       method:"POST",headers:{"Content-Type":"application/json"},
       body:JSON.stringify({username,password})
     });
@@ -198,7 +198,7 @@ $btn.addEventListener("click",login);
 // If already logged in, redirect
 const tok=localStorage.getItem("tt_token");
 if(tok){
-  fetch(`${API}/auth/me`,{headers:{"Authorization":"Bearer "+tok}})
+  fetch(`${API}/api/auth/me`,{headers:{"Authorization":"Bearer "+tok}})
     .then(r=>r.ok?r.json():null)
     .then(d=>{ if(d) window.location.href=d.user.is_admin?"admin.html":"chat.html"; })
     .catch(()=>{});
