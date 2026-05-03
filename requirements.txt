@@ -1,0 +1,11 @@
+# ThreadTalk v4 — Cloud Edition
+# No external packages required!
+# Uses only Python standard library:
+#   - http.server  (HTTP + WebSocket server)
+#   - sqlite3      (database)
+#   - threading    (one thread per client)
+#   - socket       (underlying TCP)
+#   - hashlib      (password hashing)
+#   - secrets      (session tokens)
+#   - struct       (WebSocket frame encoding)
+#   - base64       (WebSocket handshake)
