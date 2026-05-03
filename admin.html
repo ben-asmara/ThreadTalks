@@ -266,7 +266,7 @@ tr:hover td{background:var(--s2)}
 </div>
 
 <script>
-const API="http://localhost:9000";
+const API = "BACKEND_URL";
 let token="", me={};
 
 // ─── Auth guard ───────────────────────────────────────────────────────────────
@@ -507,7 +507,7 @@ async function loadLb(){
 
 // ─── Logout ───────────────────────────────────────────────────────────────────
 document.getElementById("logout-btn").addEventListener("click",async()=>{
-  await fetch(API+"/auth/logout",{method:"POST",headers:{"Authorization":"Bearer "+token}}).catch(()=>{});
+  await fetch(API+"/api/auth/logout",{method:"POST",headers:{"Authorization":"Bearer "+token}}).catch(()=>{});
   localStorage.clear();
   window.location.href="login.html";
 });
