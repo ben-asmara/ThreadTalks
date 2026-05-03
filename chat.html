@@ -208,7 +208,7 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:var(--f
 </div>
 
 <script>
-const API="http://localhost:9000";
+const API = "BACKEND_URL";
 let ws=null, myName="", myColor="", myRoom="general", myToken="", isAdmin=false;
 let typingTimeout=null, typingUsers=new Set();
 
@@ -217,7 +217,7 @@ async function initAuth(){
   myToken=localStorage.getItem("tt_token")||"";
   if(!myToken){document.getElementById("auth-overlay").style.display="flex";return;}
   try{
-    const r=await fetch(API+"/auth/me",{headers:{"Authorization":"Bearer "+myToken}});
+    const r=await fetch(API+"/api/auth/me",{headers:{"Authorization":"Bearer "+myToken}});
     if(!r.ok){localStorage.clear();document.getElementById("auth-overlay").style.display="flex";return;}
     const d=await r.json();
     const u=d.user;
@@ -324,7 +324,7 @@ function updateLb(lb){
 
 // ─── WebSocket ────────────────────────────────────────────────────────────────
 function connectWS(){
-  ws=new WebSocket("ws://localhost:8765");
+  ws=new WebSocket("BACKEND_WS_URL");
   ws.onopen=()=>{
     ws.send(JSON.stringify({type:"join",token:myToken,room:myRoom}));
   };
@@ -409,7 +409,7 @@ document.getElementById("hist-btn").addEventListener("click",()=>{
   if(ws&&ws.readyState===WebSocket.OPEN) ws.send(JSON.stringify({type:"get_history"}));
 });
 document.getElementById("logout-btn").addEventListener("click",async()=>{
-  await fetch(API+"/auth/logout",{method:"POST",headers:{"Authorization":"Bearer "+myToken}}).catch(()=>{});
+  await fetch(API+"/api/auth/logout",{method:"POST",headers:{"Authorization":"Bearer "+myToken}}).catch(()=>{});
   localStorage.clear();
   window.location.href="login.html";
 });
