@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>ThreadTalk — Create Account</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link href="https://fonts.googleapis.com/css2?family=Sora:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet"/>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#080a0f;--s1:#0e1118;--s2:#151820;--s3:#1c202b;
+  --border:rgba(255,255,255,0.07);--border2:rgba(255,255,255,0.13);
+  --text:#dde1f0;--muted:#4a5168;--accent:#00e5c3;--purple:#6c63ff;--red:#f87171;
+  --font:'Sora',sans-serif;--mono:'JetBrains Mono',monospace;
+}
+html,body{min-height:100%;background:var(--bg);color:var(--text);font-family:var(--font)}
+body::before{
+  content:'';position:fixed;inset:0;pointer-events:none;
+  background-image:
+    linear-gradient(rgba(0,229,195,.03) 1px,transparent 1px),
+    linear-gradient(90deg,rgba(0,229,195,.03) 1px,transparent 1px);
+  background-size:40px 40px;
+  animation:drift 20s linear infinite;
+}
+@keyframes drift{to{background-position:40px 40px}}
+body::after{
+  content:'';position:fixed;inset:0;pointer-events:none;
+  background:radial-gradient(ellipse 55% 45% at 50% 40%, rgba(0,229,195,.06) 0%, transparent 70%);
+}
+.page{min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:24px;position:relative;z-index:1}
+
+.logo{display:flex;align-items:center;gap:10px;margin-bottom:32px;animation:fadeDown .5s ease both}
+@keyframes fadeDown{from{opacity:0;transform:translateY(-12px)}to{opacity:1;transform:translateY(0)}}
+.logo-icon{width:42px;height:42px;background:var(--accent);border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:20px;box-shadow:0 0 24px rgba(0,229,195,.3)}
+.logo h1{font-size:22px;font-weight:700;letter-spacing:-.5px}
+.logo h1 em{color:var(--accent);font-style:normal}
+.logo small{display:block;font-family:var(--mono);font-size:10px;color:var(--muted);margin-top:1px}
+
+.card{width:100%;max-width:420px;background:var(--s1);border:1px solid var(--border2);border-radius:20px;padding:36px;animation:fadeUp .5s .1s ease both}
+@keyframes fadeUp{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:translateY(0)}}
+
+.card-head{margin-bottom:26px}
+.card-head h2{font-size:20px;font-weight:600}
+.card-head p{font-size:13px;color:var(--muted);margin-top:4px}
+
+.row2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+
+.field{margin-bottom:16px}
+.field label{display:block;font-size:11px;font-weight:600;letter-spacing:1px;text-transform:uppercase;color:var(--muted);margin-bottom:7px}
+.field input{
+  width:100%;padding:12px 14px;background:var(--s3);
+  border:1px solid var(--border2);border-radius:10px;
+  color:var(--text);font-family:var(--font);font-size:14px;outline:none;
+  transition:border-color .2s,box-shadow .2s;
+}
+.field input:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(0,229,195,.1)}
+.field input::placeholder{color:var(--muted)}
+.field input.error{border-color:var(--red)}
+.field-hint{font-size:11px;color:var(--muted);margin-top:5px;font-family:var(--mono)}
+
+.pw-wrap{position:relative}
+.pw-wrap input{padding-right:44px}
+.pw-eye{position:absolute;right:12px;top:50%;transform:translateY(-50%);background:none;border:none;color:var(--muted);cursor:pointer;font-size:15px;padding:4px;transition:color .15s}
+.pw-eye:hover{color:var(--text)}
+
+/* strength bar */
+.strength-wrap{margin-top:7px;display:flex;gap:4px;align-items:center}
+.strength-bar{flex:1;height:3px;border-radius:99px;background:var(--s3);overflow:hidden}
+.strength-fill{height:100%;border-radius:99px;transition:width .3s,background .3s;width:0}
+.strength-label{font-family:var(--mono);font-size:10px;color:var(--muted);width:40px;text-align:right}
+
+/* color picker */
+.color-picker{display:flex;gap:8px;flex-wrap:wrap;margin-top:6px}
+.color-swatch{width:26px;height:26px;border-radius:50%;cursor:pointer;border:2px solid transparent;transition:transform .15s,border-color .15s;position:relative}
+.color-swatch:hover{transform:scale(1.15)}
+.color-swatch.selected{border-color:#fff;transform:scale(1.15)}
+.color-swatch.selected::after{content:'✓';position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:11px;color:#fff;font-weight:700}
+
+.btn-primary{
+  width:100%;padding:13px;background:var(--accent);border:none;
+  border-radius:10px;color:#0a0f0d;font-family:var(--font);font-size:14px;
+  font-weight:700;cursor:pointer;margin-top:6px;
+  transition:opacity .15s,transform .1s,box-shadow .2s;
+  box-shadow:0 4px 20px rgba(0,229,195,.25);
+}
+.btn-primary:hover{opacity:.9;box-shadow:0 6px 28px rgba(0,229,195,.4)}
+.btn-primary:active{transform:scale(.98)}
+.btn-primary:disabled{opacity:.35;cursor:default;box-shadow:none}
+
+.spinner{display:inline-block;width:14px;height:14px;border:2px solid rgba(0,0,0,.2);border-top-color:#0a0f0d;border-radius:50%;animation:spin .7s linear infinite;vertical-align:middle;margin-right:6px}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+.alert{display:none;padding:10px 14px;border-radius:8px;font-size:13px;margin-bottom:16px;font-family:var(--mono)}
+.alert.err{background:rgba(248,113,113,.1);border:1px solid rgba(248,113,113,.3);color:var(--red);display:block}
+.alert.ok{background:rgba(0,229,195,.08);border:1px solid rgba(0,229,195,.25);color:var(--accent);display:block}
+
+.divider{display:flex;align-items:center;gap:10px;margin:20px 0;color:var(--muted);font-size:12px}
+.divider::before,.divider::after{content:'';flex:1;height:1px;background:var(--border)}
+.footer-link{text-align:center;margin-top:18px;font-size:13px;color:var(--muted)}
+.footer-link a{color:var(--purple);text-decoration:none;font-weight:500}
+.footer-link a:hover{text-decoration:underline}
+</style>
+</head>
+<body>
+<div class="page">
+  <div class="logo">
+    <div class="logo-icon">🧵</div>
+    <div>
+      <h1>Thread<em>Talk</em></h1>
+      <small>create account</small>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-head">
+      <h2>Create your account</h2>
+      <p>Join the conversation. Takes 10 seconds.</p>
+    </div>
+
+    <div class="alert" id="alert"></div>
+
+    <div class="row2">
+      <div class="field">
+        <label>Username</label>
+        <input id="username" type="text" placeholder="coolname" maxlength="30" autocomplete="username"/>
+        <div class="field-hint" id="u-hint">lowercase, no spaces</div>
+      </div>
+      <div class="field">
+        <label>Display Name</label>
+        <input id="display" type="text" placeholder="Cool Name" maxlength="30"/>
+      </div>
+    </div>
+
+    <div class="field">
+      <label>Password</label>
+      <div class="pw-wrap">
+        <input id="password" type="password" placeholder="Min. 6 characters" autocomplete="new-password"/>
+        <button class="pw-eye" id="eye1" type="button">👁</button>
+      </div>
+      <div class="strength-wrap">
+        <div class="strength-bar"><div class="strength-fill" id="str-fill"></div></div>
+        <div class="strength-label" id="str-lbl"></div>
+      </div>
+    </div>
+
+    <div class="field">
+      <label>Confirm Password</label>
+      <div class="pw-wrap">
+        <input id="confirm" type="password" placeholder="Repeat password" autocomplete="new-password"/>
+        <button class="pw-eye" id="eye2" type="button">👁</button>
+      </div>
+    </div>
+
+    <div class="field">
+      <label>Your color</label>
+      <div class="color-picker" id="color-picker"></div>
+    </div>
+
+    <button class="btn-primary" id="reg-btn">Create Account</button>
+    <div class="divider">already have one?</div>
+    <div class="footer-link"><a href="login.html">Sign in instead</a></div>
+  </div>
+</div>
+
+<script>
+const API="http://localhost:9000";
+const COLORS=["#6c63ff","#00e5c3","#f59e0b","#ec4899","#3b82f6","#10b981","#f97316","#a855f7","#06b6d4","#84cc16"];
+let selectedColor=COLORS[0];
+
+// Build color swatches
+const $cp=document.getElementById("color-picker");
+COLORS.forEach(c=>{
+  const s=document.createElement("div");
+  s.className="color-swatch"+(c===selectedColor?" selected":"");
+  s.style.background=c;
+  s.title=c;
+  s.onclick=()=>{
+    selectedColor=c;
+    document.querySelectorAll(".color-swatch").forEach(el=>el.classList.remove("selected"));
+    s.classList.add("selected");
+  };
+  $cp.appendChild(s);
+});
+
+// Password visibility
+document.getElementById("eye1").onclick=()=>{
+  const i=document.getElementById("password");
+  i.type=i.type==="password"?"text":"password";
+};
+document.getElementById("eye2").onclick=()=>{
+  const i=document.getElementById("confirm");
+  i.type=i.type==="password"?"text":"password";
+};
+
+// Password strength
+document.getElementById("password").addEventListener("input",function(){
+  const v=this.value, f=document.getElementById("str-fill"), l=document.getElementById("str-lbl");
+  let score=0;
+  if(v.length>=6)score++;
+  if(v.length>=10)score++;
+  if(/[A-Z]/.test(v))score++;
+  if(/[0-9]/.test(v))score++;
+  if(/[^a-zA-Z0-9]/.test(v))score++;
+  const map=[
+    [0,""],
+    [1,{w:"20%",bg:"#f87171",t:"Weak"}],
+    [2,{w:"40%",bg:"#f87171",t:"Weak"}],
+    [3,{w:"60%",bg:"#f59e0b",t:"Fair"}],
+    [4,{w:"80%",bg:"#00e5c3",t:"Good"}],
+    [5,{w:"100%",bg:"#10b981",t:"Strong"}],
+  ];
+  const m=map[score]||map[0];
+  if(m[1]){f.style.width=m[1].w;f.style.background=m[1].bg;l.textContent=m[1].t;}
+  else{f.style.width="0";l.textContent="";}
+});
+
+// Username auto-format
+document.getElementById("username").addEventListener("input",function(){
+  this.value=this.value.toLowerCase().replace(/[^a-z0-9_]/g,"");
+  const h=document.getElementById("u-hint");
+  if(this.value.length>=3){h.textContent="✓ looks good";h.style.color="var(--accent)";}
+  else{h.textContent="lowercase, no spaces";h.style.color="var(--muted)";}
+});
+
+// Display name auto-fill from username
+document.getElementById("username").addEventListener("blur",function(){
+  const d=document.getElementById("display");
+  if(!d.value&&this.value)d.value=this.value.charAt(0).toUpperCase()+this.value.slice(1);
+});
+
+const $alert=document.getElementById("alert");
+const $btn=document.getElementById("reg-btn");
+function showErr(m){$alert.className="alert err";$alert.textContent=m;}
+function showOk(m){$alert.className="alert ok";$alert.textContent=m;}
+function setLoading(on){
+  $btn.disabled=on;
+  $btn.innerHTML=on?'<span class="spinner"></span>Creating…':'Create Account';
+}
+
+async function register(){
+  const username=document.getElementById("username").value.trim();
+  const display=document.getElementById("display").value.trim()||username;
+  const password=document.getElementById("password").value;
+  const confirm=document.getElementById("confirm").value;
+
+  if(!username||!password){showErr("Fill in all required fields.");return;}
+  if(username.length<3){showErr("Username must be at least 3 characters.");return;}
+  if(password.length<6){showErr("Password must be at least 6 characters.");return;}
+  if(password!==confirm){showErr("Passwords don't match.");return;}
+
+  setLoading(true);
+  try{
+    const r=await fetch(`${API}/auth/register`,{
+      method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({username,display_name:display,password})
+    });
+    const d=await r.json();
+    if(!r.ok){showErr(d.error||"Registration failed.");setLoading(false);return;}
+    localStorage.setItem("tt_token",d.token);
+    localStorage.setItem("tt_user",JSON.stringify(d.user));
+    showOk("Account created! Welcome to ThreadTalk 🎉");
+    setTimeout(()=>window.location.href="chat.html",800);
+  }catch(e){
+    showErr("Cannot reach server. Is it running?");
+    setLoading(false);
+  }
+}
+
+$btn.addEventListener("click",register);
+document.addEventListener("keydown",e=>{if(e.key==="Enter")register();});
+</script>
+</body>
+</html>
