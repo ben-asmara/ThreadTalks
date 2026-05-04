@@ -101,9 +101,7 @@ body::after{
 .footer-link a{color:var(--accent);text-decoration:none;font-weight:500}
 .footer-link a:hover{text-decoration:underline}
 
-/* admin hint */
-.admin-hint{background:var(--s2);border:1px solid var(--border);border-radius:8px;padding:10px 14px;margin-bottom:20px;font-family:var(--mono);font-size:11px;color:var(--muted)}
-.admin-hint strong{color:var(--accent)}
+
 </style>
 </head>
 <body>
@@ -120,10 +118,6 @@ body::after{
     <div class="card-head">
       <h2>Welcome back</h2>
       <p>Sign in to your account to continue.</p>
-    </div>
-
-    <div class="admin-hint">
-      🔑 Default admin — <strong>admin</strong> / <strong>admin123</strong>
     </div>
 
     <div class="alert" id="alert"></div>
@@ -150,7 +144,7 @@ body::after{
 </div>
 
 <script>
-const API = "https://threadtalks.onrender.com";
+const API = "BACKEND_URL";
 
 const $user  = document.getElementById("username");
 const $pass  = document.getElementById("password");
