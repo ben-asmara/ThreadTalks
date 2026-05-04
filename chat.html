@@ -324,7 +324,7 @@ function updateLb(lb){
 
 // ─── WebSocket ────────────────────────────────────────────────────────────────
 function connectWS(){
-  ws=new WebSocket("BACKEND_WS_URL");
+  ws=new WebSocket("wss://threadtalks.onrender.com/ws");
   ws.onopen=()=>{
     ws.send(JSON.stringify({type:"join",token:myToken,room:myRoom}));
   };
