@@ -9,4 +9,4 @@
 #   - secrets      (session tokens)
 #   - struct       (WebSocket frame encoding)
 #   - base64       (WebSocket handshake)
-websockets==12.0
+aiohttp==3.11.18
