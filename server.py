@@ -17,7 +17,12 @@ import threading, sqlite3, json, sys, hashlib, secrets, os, struct, base64
 import hashlib as hl
 from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from socketserver import ThreadingMixIn
 from urllib.parse import urlparse
+
+class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
+    """Each HTTP/WebSocket request gets its own thread — required for Render."""
+    daemon_threads = True
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 PORT    = int(os.environ.get("PORT", 10000))
@@ -185,8 +190,12 @@ def ws_send(wfile, text: str):
     except Exception:
         return False
 
-def ws_close(wfile):
-    try: wfile.write(bytes([0x88, 0x00])); wfile.flush()
+def ws_close(conn):
+    try:
+        conn["wfile"].write(bytes([0x88, 0x00]))
+        conn["wfile"].flush()
+    except: pass
+    try: conn.get("sock") and conn["sock"].close()
     except: pass
 
 # ─── Chat helpers ─────────────────────────────────────────────────────────────
@@ -213,7 +222,7 @@ def remove_client(conn):
     with ws_clients_lock:
         info = ws_clients.pop(conn, None)
     if not info: return
-    try: ws_close(conn["wfile"])
+    try: ws_close(conn)
     except: pass
     room = info.get("room","general")
     print(f"[ws] ✗ {info['name']} left #{room}")
@@ -240,10 +249,10 @@ def handle_ws(conn):
 
     if not user:
         send_to(conn, {"type":"error","text":"Invalid session. Please sign in."})
-        ws_close(conn["wfile"]); return
+        ws_close(conn); return
     if user.get("is_banned"):
         send_to(conn, {"type":"error","text":"Your account has been banned."})
-        ws_close(conn["wfile"]); return
+        ws_close(conn); return
 
     name    = user["display_name"]
     color   = user["color"]
@@ -345,11 +354,15 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         # WebSocket upgrade
         if self.headers.get("Upgrade","").lower() == "websocket":
-            ws_handshake(self.rfile, self.wfile, self.headers)
-            conn = {"rfile":self.rfile,"wfile":self.wfile}
-            t = threading.Thread(target=handle_ws, args=(conn,), daemon=True,
-                                 name=f"ws-{threading.active_count()}")
-            t.start(); t.join()
+            # Use raw socket with unbuffered files for reliable WS framing
+            raw = self.connection
+            rfile = raw.makefile("rb", buffering=0)
+            wfile = raw.makefile("wb", buffering=0)
+            ws_handshake(rfile, wfile, self.headers)
+            conn = {"rfile": rfile, "wfile": wfile, "sock": raw}
+            # handle_ws runs in THIS thread (ThreadingMixIn gives us our own thread)
+            # so the socket stays open for the lifetime of the connection
+            handle_ws(conn)
             return
 
         path = urlparse(self.path).path
@@ -504,7 +517,7 @@ if __name__ == "__main__":
 ║  Admin    : admin / admin123                     ║
 ╚══════════════════════════════════════════════════╝
 """)
-    srv = HTTPServer(("0.0.0.0", PORT), Handler)
+    srv = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     print(f"[server] Listening on :{PORT} …  (Ctrl-C to stop)")
     try:
         srv.serve_forever()
