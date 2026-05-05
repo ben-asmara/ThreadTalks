@@ -323,9 +323,20 @@ function updateLb(lb){
 }
 
 // ─── WebSocket ────────────────────────────────────────────────────────────────
+// Derive WebSocket URL automatically from the API URL — no hardcoding needed!
+// http://... → ws://...   |   https://... → wss://...
+const WS_URL = API.replace(/^http/, "ws") + "/ws";
+
+let reconnectTimer = null;
+let reconnectDelay = 2000;
+
 function connectWS(){
-  ws=new WebSocket("wss://threadtalks.onrender.com/ws");
+  $pill.className="conn-pill"; $pill.textContent="⬤ Connecting…";
+  try { ws = new WebSocket(WS_URL); }
+  catch(e){ scheduleReconnect(); return; }
+
   ws.onopen=()=>{
+    reconnectDelay = 2000; // reset backoff on success
     ws.send(JSON.stringify({type:"join",token:myToken,room:myRoom}));
   };
   ws.onmessage=({data})=>{let m;try{m=JSON.parse(data);}catch{return;} handle(m);};
@@ -333,8 +344,17 @@ function connectWS(){
   ws.onclose=()=>{
     $pill.className="conn-pill err";$pill.textContent="⬤ Disconnected";
     $input.disabled=true; $sendBtn.disabled=true;
-    appendSys("Disconnected from server.");
+    appendSys(`Disconnected. Reconnecting in ${reconnectDelay/1000}s…`);
+    scheduleReconnect();
   };
+}
+
+function scheduleReconnect(){
+  clearTimeout(reconnectTimer);
+  reconnectTimer = setTimeout(()=>{
+    reconnectDelay = Math.min(reconnectDelay * 1.5, 30000); // max 30s backoff
+    connectWS();
+  }, reconnectDelay);
 }
 
 function handle(m){
