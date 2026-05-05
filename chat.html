@@ -325,11 +325,8 @@ function updateLb(lb){
 // ─── WebSocket ────────────────────────────────────────────────────────────────
 // Derive WebSocket URL automatically from the API URL — no hardcoding needed!
 // http://... → ws://...   |   https://... → wss://...
-// WS runs on PORT+1 on Render (e.g. API is :10000, WS is :10001)
-const WS_URL = API.replace(/^http/, "ws").replace(/(:\d+)?$/, m => {
-  const port = m ? parseInt(m.slice(1)) : (API.startsWith("https") ? 443 : 80);
-  return ":" + (port + 1);
-});
+// Same host & port as the API, just swap http→ws and add /ws path
+const WS_URL = API.replace(/^http/, "ws") + "/ws";
 
 let reconnectTimer = null;
 let reconnectDelay = 2000;
