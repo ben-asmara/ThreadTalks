@@ -274,7 +274,7 @@ async function init(){
   token=localStorage.getItem("tt_token")||"";
   if(!token){window.location.href="login.html";return;}
   try{
-    const r=await apiFetch("/auth/me");
+    const r=await apiFetch("/api/auth/me");
     if(!r.user||!r.user.is_admin){window.location.href="chat.html";return;}
     me=r.user;
     document.getElementById("sb-name").textContent=me.display_name;
@@ -331,7 +331,7 @@ function toast(msg,type="ok"){
 // ─── Load all (overview) ──────────────────────────────────────────────────────
 async function loadAll(){
   try{
-    const d=await apiFetch("/admin/stats");
+    const d=await apiFetch("/api/admin/stats");
     const s=d.stats;
     document.getElementById("st-msgs").textContent=s.messages;
     document.getElementById("st-users").textContent=s.users;
@@ -359,7 +359,7 @@ function renderOverviewLb(lb){
 // ─── Users ────────────────────────────────────────────────────────────────────
 async function loadUsers(){
   try{
-    const d=await apiFetch("/admin/users");
+    const d=await apiFetch("/api/admin/users");
     const tb=document.getElementById("users-tbody");
     document.getElementById("user-count").textContent=d.users.length+" users";
     if(!d.users.length){tb.innerHTML='<tr><td colspan="7"><div class="empty"><div class="icon">👥</div><p>No users yet.</p></div></td></tr>';return;}
@@ -397,7 +397,7 @@ async function loadUsers(){
 
 async function toggleBan(uid,val){
   try{
-    await apiFetch(`/admin/users/${uid}/ban`,{method:"PUT",body:{banned:!!val}});
+    await apiFetch(`/api/admin/users/${uid}/ban`,{method:"PUT",body:{banned:!!val}});
     toast(val?"User banned.":"User unbanned.");
     loadUsers();
   }catch(e){toast(e.message,"err");}
@@ -405,7 +405,7 @@ async function toggleBan(uid,val){
 
 async function toggleAdmin(uid,val){
   try{
-    await apiFetch(`/admin/users/${uid}/admin`,{method:"PUT",body:{is_admin:!!val}});
+    await apiFetch(`/api/admin/users/${uid}/admin`,{method:"PUT",body:{is_admin:!!val}});
     toast(val?"Admin granted.":"Admin removed.");
     loadUsers();
   }catch(e){toast(e.message,"err");}
@@ -414,7 +414,7 @@ async function toggleAdmin(uid,val){
 // ─── Messages ─────────────────────────────────────────────────────────────────
 async function loadMessages(){
   try{
-    const d=await apiFetch("/admin/messages");
+    const d=await apiFetch("/api/admin/messages");
     const tb=document.getElementById("msgs-tbody");
     if(!d.messages.length){tb.innerHTML='<tr><td colspan="5"><div class="empty"><div class="icon">💬</div><p>No messages yet.</p></div></td></tr>';return;}
     tb.innerHTML=d.messages.map(m=>`
@@ -432,7 +432,7 @@ async function loadMessages(){
 async function deleteMsg(id){
   if(!confirm("Delete this message?"))return;
   try{
-    await apiFetch(`/admin/messages/${id}`,{method:"DELETE"});
+    await apiFetch(`/api/admin/messages/${id}`,{method:"DELETE"});
     document.getElementById("mrow-"+id)?.remove();
     toast("Message deleted.");
   }catch(e){toast(e.message,"err");}
@@ -445,7 +445,7 @@ function escHtml(s){
 // ─── Rooms ────────────────────────────────────────────────────────────────────
 async function loadRooms(){
   try{
-    const d=await apiFetch("/admin/rooms");
+    const d=await apiFetch("/api/admin/rooms");
     const tb=document.getElementById("rooms-tbody");
     if(!d.rooms.length){tb.innerHTML='<tr><td colspan="6"><div class="empty"><div class="icon">#</div><p>No rooms.</p></div></td></tr>';return;}
     tb.innerHTML=d.rooms.map(r=>`
@@ -468,7 +468,7 @@ async function createRoom(){
   const topic=document.getElementById("new-room-topic").value.trim();
   if(!name){toast("Enter a room name.","err");return;}
   try{
-    await apiFetch("/admin/rooms",{method:"POST",body:{name,topic}});
+    await apiFetch("/api/admin/rooms",{method:"POST",body:{name,topic}});
     toast(`#${name} created!`);
     document.getElementById("new-room-name").value="";
     document.getElementById("new-room-topic").value="";
@@ -479,7 +479,7 @@ async function createRoom(){
 async function deleteRoom(name){
   if(!confirm(`Delete #${name} and all its messages?`))return;
   try{
-    await apiFetch(`/admin/rooms/${name}`,{method:"DELETE"});
+    await apiFetch(`/api/admin/rooms/${name}`,{method:"DELETE"});
     document.getElementById("rrow-"+name)?.remove();
     toast(`#${name} deleted.`);
   }catch(e){toast(e.message,"err");}
@@ -488,7 +488,7 @@ async function deleteRoom(name){
 // ─── Leaderboard ──────────────────────────────────────────────────────────────
 async function loadLb(){
   try{
-    const d=await apiFetch("/admin/stats");
+    const d=await apiFetch("/api/admin/stats");
     const lb=d.leaderboard||[];
     const el=document.getElementById("lb-list");
     if(!lb.length){el.innerHTML='<div class="empty"><div class="icon">🏆</div><p>No messages yet.</p></div>';return;}
